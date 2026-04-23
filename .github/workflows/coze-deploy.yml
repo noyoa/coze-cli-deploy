@@ -1,0 +1,215 @@
+# Coze CLI 自动化部署 - GitHub Actions 配置
+# 
+# 使用方法：
+# 1. 将此文件夹复制到你的 GitHub 仓库根目录
+# 2. 在 GitHub 仓库 Settings → Secrets 中添加以下密钥：
+#    - COZE_PAT: 你的 Coze Personal Access Token
+#    - COZE_SPACE_ID: 你的 Coze 工作空间 ID
+# 3. 推送到 main 分支即可触发部署
+
+name: 🚀 Coze CI/CD Pipeline
+
+on:
+  # 在 main 分支 push 时触发
+  push:
+    branches: [ main ]
+  
+  # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      message:
+        description: '部署消息'
+        required: true
+        default: '手动部署'
+      project_type:
+        description: '项目类型'
+        required: false
+        default: 'web'
+        type: choice
+        options:
+          - web
+          - app
+          - skill
+          - miniprogram
+
+env:
+  COZE_CLI_VERSION: 'latest'
+
+jobs:
+  # ========================================
+  # Job 1: 创建并部署项目
+  # ========================================
+  deploy:
+    name: 📦 创建并部署 Coze 项目
+    runs-on: ubuntu-latest
+    
+    steps:
+      # ----------------------------
+      # 1. 检出代码
+      # ----------------------------
+      - name: 🚚 Checkout 代码
+        uses: actions/checkout@v4
+
+      # ----------------------------
+      # 2. 设置 Node.js
+      # ----------------------------
+      - name: 📦 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ----------------------------
+      # 3. 安装 Coze CLI
+      # ----------------------------
+      - name: 🔧 安装 Coze CLI
+        run: npm install -g @coze/cli@${{ env.COZE_CLI_VERSION }}
+
+      # ----------------------------
+      # 4. 验证 Coze CLI
+      # ----------------------------
+      - name: ✅ 验证 Coze CLI
+        run: |
+          coze --version
+          coze auth status
+
+      # ----------------------------
+      # 5. 配置 Coze 认证
+      # ----------------------------
+      - name: 🔐 配置 Coze 认证
+        run: |
+          coze auth login --token ${{ secrets.COZE_PAT }}
+          echo "✅ Coze 认证成功"
+
+      # ----------------------------
+      # 6. 选择工作空间
+      # ----------------------------
+      - name: 🏢 选择工作空间
+        run: |
+          coze space use ${{ secrets.COZE_SPACE_ID }}
+          echo "✅ 工作空间切换成功"
+
+      # ----------------------------
+      # 7. 获取 Git 提交信息
+      # ----------------------------
+      - name: 📝 获取提交信息
+        id: commit_info
+        run: |
+          echo "message=$(echo '${{ github.event.head_commit.message }}' | head -1)" >> $GITHUB_OUTPUT
+          echo "sha=$(echo '${{ github.sha }}' | cut -c1-7)" >> $GITHUB_OUTPUT
+          echo "author=${{ github.actor }}" >> $GITHUB_OUTPUT
+
+      # ----------------------------
+      # 8. 创建项目
+      # ----------------------------
+      - name: 📦 创建 Coze 项目
+        id: create_project
+        run: |
+          DEPLOY_MESSAGE="🚀 自动部署
+          分支：${{ github.ref_name }}
+          提交：${{ steps.commit_info.outputs.sha }}
+          作者：${{ steps.commit_info.outputs.author }}
+          时间：$(date '+%Y-%m-%d %H:%M:%S')
+          仓库：${{ github.repository }}
+          "
+          
+          echo "📋 部署消息："
+          echo "$DEPLOY_MESSAGE"
+          
+          RESPONSE=$(coze code project create \
+            --message "$DEPLOY_MESSAGE" \
+            --type ${{ inputs.project_type || 'web' }} \
+            --format json)
+          
+          echo "📨 服务器响应："
+          echo "$RESPONSE" | jq '.'
+          
+          PROJECT_ID=$(echo "$RESPONSE" | jq -r '.project_id')
+          
+          if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+            echo "❌ 项目创建失败"
+            exit 1
+          fi
+          
+          echo "project_id=$PROJECT_ID" >> $GITHUB_OUTPUT
+          echo "✅ 项目创建成功：$PROJECT_ID"
+
+      # ----------------------------
+      # 9. 发送开发指令
+      # ----------------------------
+      - name: 💬 发送开发指令
+        run: |
+          echo "📨 正在发送开发指令..."
+          
+          DEV_MESSAGE="## 🎯 开发任务
+
+请根据最新代码实现以下功能：
+
+### 📋 任务信息
+- **分支**: ${{ github.ref_name }}
+- **提交**: ${{ steps.commit_info.outputs.sha }}
+- **作者**: ${{ steps.commit_info.outputs.author }}
+- **仓库**: ${{ github.repository }}
+
+### 📝 需求描述
+请读取最新提交的代码，实现相关功能。
+
+### 🔗 相关链接
+- GitHub 提交: https://github.com/${{ github.repository }}/commit/${{ github.sha }}
+"
+          
+          coze code message send "$DEV_MESSAGE" -p ${{ steps.create_project.outputs.project_id }}
+          echo "✅ 开发指令发送成功"
+
+      # ----------------------------
+      # 10. 部署项目
+      # ----------------------------
+      - name: 🚀 部署项目
+        run: |
+          echo "🚀 开始部署项目..."
+          coze code deploy ${{ steps.create_project.outputs.project_id }} --wait
+          echo "✅ 部署完成"
+
+      # ----------------------------
+      # 11. 输出结果
+      # ----------------------------
+      - name: 🎉 部署成功
+        run: |
+          echo ""
+          echo "╔═══════════════════════════════════════════════════════╗"
+          echo "║          ✅ 部署完成！                              ║"
+          echo "╠═══════════════════════════════════════════════════════╣"
+          echo "║  项目 ID：${{ steps.create_project.outputs.project_id }}"
+          echo "║  工作空间：${{ secrets.COZE_SPACE_ID }}"
+          echo "║  提交 SHA：${{ steps.commit_info.outputs.sha }}"
+          echo "║  触发分支：${{ github.ref_name }}"
+          echo "╠═══════════════════════════════════════════════════════╣"
+          echo "║  访问地址：                                          ║"
+          echo "║  https://coze.cn/space/${{ secrets.COZE_SPACE_ID }}"
+          echo "╚═══════════════════════════════════════════════════════╝"
+
+  # ========================================
+  # Job 2: 清理旧项目（可选）
+  # ========================================
+  cleanup:
+    name: 🧹 清理旧项目
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: false  # 设置为 true 可以启用自动清理
+
+    steps:
+      - name: 🚚 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔧 安装 Coze CLI
+        run: npm install -g @coze/cli
+
+      - name: 🔐 认证
+        run: |
+          coze auth login --token ${{ secrets.COZE_PAT }}
+          coze space use ${{ secrets.COZE_SPACE_ID }}
+
+      - name: 📋 列出旧项目
+        run: |
+          echo "📋 当前工作空间中的项目："
+          coze code project list --format json | jq '.'
